@@ -384,11 +384,8 @@ or
 SUMMARY: Steps to enable PWM on the Roseline Linux kernel
 ===================================================================
 
-0. Get a window that's like showing output of dmesg like every
 
-`/sys/kernel/debug/pinctrl/4410800.pinmux/pinmux-pins`
-
-1. Edit `bone_pwm_P8_34` to add a fragment for pwmess
+1. Edit `bone_pwm_P8_34` to add a fragment for `pwmss`
 
     - verify no errors in dmesg
         - if HDMI claims the pin,
