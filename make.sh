@@ -1,0 +1,1 @@
+pandoc -s --toc -f markdown -t html --filter img-to-zoomable-link.py -c pandoc.css -o roseline-beaglebone-device-tree.html README.md

@@ -1,0 +1,474 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <title>Enabling PWM on Beaglebone Black with Roseline kernel patches</title>
+  <style type="text/css">code{white-space: pre;}</style>
+  <link rel="stylesheet" href="pandoc.css" type="text/css" />
+  <script type="text/javascript" src="highslide/highslide.js" ></script>
+</head>
+<body>
+<div id="header">
+<h1 class="title">Enabling PWM on Beaglebone Black with Roseline kernel patches</h1>
+</div>
+<div id="TOC">
+<ul>
+<li><a href="#roseline-project-debugging-device-tree-overlays">Roseline Project: Debugging Device Tree Overlays</a></li>
+<li><a href="#executive-summary">Executive Summary</a></li>
+<li><a href="#minimum-working-example-of-the-problem">Minimum-Working-Example of the Problem</a></li>
+<li><a href="#troubleshooting-with-anh">Troubleshooting with Anh</a><ul>
+<li><a href="#try-to-build-load-a-pwm-dto">Try to build &amp; load a PWM DTO</a></li>
+<li><a href="#load-failed-hdmi-claims-pin.-why">Load failed; HDMI claims pin. Why?</a><ul>
+<li><a href="#conclusion-cant-figure-out-why-hdmi-is-claiming-any-pins">Conclusion: Can't figure out why HDMI is claiming any pins</a></li>
+</ul></li>
+<li><a href="#despite-failing-to-load-did-the-dto-produce-a-pwm-dir">Despite failing to load, did the DTO produce a pwm dir?</a><ul>
+<li><a href="#conclusion-didnt-find-any-pwm-stuff-sysclass-contains-weird-stuff.">Conclusion: Didn't find any PWM stuff; <code>/sys/class/</code> contains weird stuff.</a></li>
+</ul></li>
+<li><a href="#reconfiguring-dto-file-to-use-unclaimed-pwm-pin-p9_16">Reconfiguring DTO file to use unclaimed PWM pin P9_16</a><ul>
+<li><a href="#conclusion-successfully-claimed-p9_16.">Conclusion: Successfully claimed P9_16.</a></li>
+</ul></li>
+<li><a href="#explore-diff-btwn-lkms-bone-pinmux-helper-and-pwm_test">Explore diff btwn LKMs <code>bone-pinmux-helper</code> and <code>pwm_test</code></a><ul>
+<li><a href="#conclusion-edit-our-dto-to-use-pwm_test-lkm-instead-of-bone-pinmux-helper-seems-better-for-pwm.">Conclusion: Edit our DTO to use <code>pwm_test</code> LKM instead of <code>bone-pinmux-helper</code>, seems better for PWM.</a></li>
+</ul></li>
+<li><a href="#examine-the-am33xx_pwm-dto-how-does-it-configure-pwm">Examine the <code>AM33XX_PWM</code> DTO; how does <strong>it</strong> configure PWM?</a><ul>
+<li><a href="#important-add-an-additional-clause-in-bone_pwm_p8_34-00a0.dts-to-enable-other-pwm-because-there-was-one-missing.">Important: Add an additional clause in <code>bone_pwm_P8_34-00A0.dts</code> to enable other PWM because there was one missing.</a></li>
+</ul></li>
+</ul></li>
+<li><a href="#summary-steps-to-enable-pwm-on-the-roseline-linux-kernel">SUMMARY: Steps to enable PWM on the Roseline Linux kernel</a></li>
+<li><a href="#appendices">APPENDICES</a></li>
+<li><a href="#understanding-device-tree-overlays">Understanding Device Tree Overlays</a></li>
+<li><a href="#epilog">Epilog</a></li>
+<li><a href="#misc.-notes">Misc. Notes</a></li>
+<li><a href="#resources">Resources</a></li>
+<li><a href="#reference">Reference</a></li>
+</ul>
+</div>
+<h1 id="roseline-project-debugging-device-tree-overlays">Roseline Project: Debugging Device Tree Overlays</h1>
+<p>We demonstrate some debugging techniques while enabling PWM on the Roseline linux kernel.</p>
+<h1 id="executive-summary">Executive Summary</h1>
+<p>Mar 2017</p>
+<p>I couldn't get PWM working on the Linux kernel used by our Roseline project (UCLA Roseline kernel, Linux kernel version 4.1.12). Anh Luong from Univ of Utah helped me debug it. It amounted to a number of configuration bugs.</p>
+<p>There were three main problems:</p>
+<ol style="list-style-type: decimal">
+<li>We couldn't load our DTO because HDMI was claiming pin <code>P8_34</code>.
+<ul>
+<li>To reproduce:
+<ul>
+<li><code>capes bone_pwm_P8_34</code> produces error in <code>dmesg</code> log</li>
+<li>Derek's table: <code>P8_34</code> is pin 51</li>
+<li>Print out pin info: <code>/sys/kernel/debug/pinctrl/44e10800.pinmux/pins</code>, see <code>HDMI CLAIMED</code> for pin 51.</li>
+</ul></li>
+<li>Fixed by switching to an unclaimed pin <code>P9_16</code>, which supports PWM peripheral PWM1B.
+<ul>
+<li>Modify <code>bone_pwm_P8_34.dts</code> with different hex numbers to use <code>P9_16</code>.</li>
+</ul></li>
+</ul></li>
+<li>After successfully loading the DTO, it still didn't produce a sysfs entry with a file to let us change duty cycle.
+<ul>
+<li><code>find /sys/ -iname &quot;*duty*&quot;</code> empty</li>
+<li><code>find /sys/ -iname &quot;*pwm*&quot;</code> no useful results</li>
+<li>This was because of a bug in our <code>bone_pwm_P8_34</code> DTO, which was missing a clause to enable another PWM-related peripheral <code>epwmss1</code>.</li>
+<li>Decompiled AM33XX_PWM DTO to see how it's &quot;supposed&quot; to work.
+<ul>
+<li>Saw it enabled both <code>ehrpwm1</code> but also <code>epwmss1</code>.</li>
+</ul></li>
+<li>Added clauses to <code>bone_pwm_P8_34</code> to enable the extra PWM peripheral <code>epwmss1</code>.</li>
+</ul></li>
+<li>After enabling the extra PWM peripheral, it still didn't produce a duty-cycle sysfs entry.
+<ul>
+<li>This was because the <code>bone-pwm-helper</code> linux kernel module seems to have a bug / feature that it doesn't expose much PWM functionality in a sysfs entry.</li>
+<li>Instead used the LKM <code>pwm_test</code>:
+<ul>
+<li>In <code>bone_pwm_P8_34.dts</code>, replaced <code>compatible=&quot;bone-pinmux-helper&quot;</code> with <code>compatible=&quot;pwm_test&quot;</code>.</li>
+</ul></li>
+<li>Wasn't sure this would work because our Roseline kernel doesn't seem to include the LKM <code>pwm_test</code>:
+<ul>
+<li><code>modinfo pwm_test</code> returns empty.</li>
+</ul></li>
+</ul></li>
+</ol>
+<p>This file is a summary of my video-chat with Anh as we debugged the problem, which lives here:</p>
+<ul>
+<li><code>/Users/justin/Dropbox/DC_motor/Anh-helps-roseline-device-tree/</code>
+<ul>
+<li><code>anh-helps-good-aud-cropped.mov</code></li>
+<li><code>anh-helps2-good-aud-cropped.mov</code></li>
+</ul></li>
+</ul>
+<p>Some context:</p>
+<p><a href="Images/2017-04-20-14-53-26.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-14-53-26.png" title="fig:blah" width="400" /></a></p>
+<h1 id="minimum-working-example-of-the-problem">Minimum-Working-Example of the Problem</h1>
+<p>Email I sent to Anh asking for help:</p>
+<ul>
+<li><code>/Users/justin/Desktop/anh-helps-roseline-beaglebone-device-tree/code/integration-test.zip.asc</code></li>
+<li><a href="https://mail.google.com/mail/u/0/#search/luong%40eng.utah.edu/15b1ba237ae00b66">https://mail.google.com/mail/u/0/#search/luong%40eng.utah.edu/15b1ba237ae00b66</a></li>
+<li><code>/Users/justin/Dropbox/DC_motor/Anh-helps-roseline-device-tree/</code></li>
+</ul>
+<p>Hi Anh,</p>
+<p>Thanks for chatting with me today about device-tree stuff. I've attached a zipfile of our integration effort.</p>
+<p>Gmail won't let me send a zipfile with exe files, so I encrypted it with gpg with the passphrase 'roseline'.</p>
+<p>The zipfile contains:</p>
+<ul>
+<li>overlays/ : all our DTOs.</li>
+<li>pid/ : my PID controller that drives a DC motor using PWM, QEP, and GPIO.</li>
+<li>time_sync/ : example of QoT / PRU time synchronization</li>
+<li>pru-sets-pwm/ : the PRU configures the PWM and sets it to a 10% duty-cycle at 30kHz on pin P8_34. (doesn't work!)</li>
+</ul>
+<p>You should run the script run.sh. It builds everything --- including compiling the .dts files, putting them in /lib/firmware, and 'make'ing all the PRU and C code. Then it runs the program pru-sets-pwm/pru-set-pwm.</p>
+<p>The script config-pins.sh uses 'config-pin' to configure various pins for our intended operation, e.g., pin P8_34 should be in mode 2 (PWM). You do not need to call it, since run.sh calls it.</p>
+<p>As we discussed, the current problem is that the program ./pru-sets-pwm/pru-set-pwm does not work: The PRU doesn't set a PWM on P8_34.</p>
+<p>I'm very grateful for any insights you have on this!</p>
+<p>Best, Justin</p>
+<h1 id="troubleshooting-with-anh">Troubleshooting with Anh</h1>
+<h2 id="try-to-build-load-a-pwm-dto">Try to build &amp; load a PWM DTO</h2>
+<p>Here is a &quot;device tree overlay&quot; source file named <code>integration-test/overlays/bone_pwm_P8_34-00A0.dts</code> that we will try to build and load:</p>
+<p><a href="Images/2017-04-20-15-59-48.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-15-59-48.png" title="fig:blah" width="400" /></a></p>
+<p><a href="Images/2017-04-20-16-03-01.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-16-03-01.png" title="fig:blah" width="400" /></a></p>
+<p>First we compile it and move it to <code>/lib/firmware</code> (where the BBB looks for compiled DTOs), like this:</p>
+<p><a href="Images/2017-04-20-15-08-10.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-15-08-10.png" title="fig:blah" width="400" /></a></p>
+<p>Then we check to see which DTOs are already loaded, with the <code>capes</code> cmd:</p>
+<p><a href="Images/2017-04-20-15-56-50.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-15-56-50.png" title="fig:blah" width="400" /></a></p>
+<p>Note: <code>capes</code> is just shorthand for <code>echo bone_P8_34_pwm &gt; $(find /sys/devices -name slots)</code> or something.</p>
+<p>Then we load the DTO with the <code>capes</code> cmd:</p>
+<p><a href="Images/2017-04-20-16-02-36.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-16-02-36.png" title="fig:blah" width="400" /></a></p>
+<p>PROBLEM: Although it seemed to build ok because it appears in the slots, it turns out the load actually failed, as <code>dmesg</code> shows:</p>
+<p><a href="Images/2017-04-20-15-57-22.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-15-57-22.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li><p>Q: Note that <code>bone-pinmux-helper</code> and <code>pinctrl-single</code> both appear in the error msg. I think those are the names of linux kernel modules that help configuring the SoC's pinmux. What dir contains these binary kernel modules / source files? Where is this documented?</p></li>
+<li><p>Q: I see in <code>/sys/bus/platform/drivers/pinctrl-single</code> the write-only files <code>bind</code>, <code>unbind</code>, and <code>uevent</code>. What are those write-only files?</p></li>
+</ul>
+<p>The error message says that HDMI is claiming the pin. Let's see about that.</p>
+<h2 id="load-failed-hdmi-claims-pin.-why">Load failed; HDMI claims pin. Why?</h2>
+<p>&quot;How to tell what a pin is configured as?&quot;</p>
+<p>See <code>/sys/kernel/debug/pinctrl/44e10800.pinmux/pins</code>:</p>
+<p><a href="Images/2017-04-20-16-05-43.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-16-05-43.png" title="fig:blah" width="400" /></a></p>
+<p><a href="Images/2017-04-20-16-06-04.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-16-06-04.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li>Derek's table: pin P8_34 is SoC ball pin 51.</li>
+<li>pin numbers correspond to a pin on the bottom of the SoC, use Derek's table to map that to a header pin.</li>
+<li><code>pinctrl-single</code>: a kernel driver responsible for ... configuring the pinmux?</li>
+</ul>
+<p>See also <code>/sys/kernel/debug/pinctrl/44e10800.pinmux/pinmux-pins</code>:</p>
+<p><a href="Images/2017-04-20-16-06-50.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-16-06-50.png" title="fig:blah" width="400" /></a></p>
+<p><a href="Images/2017-04-20-16-07-16.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-16-07-16.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li>Pin P8-34 (pin 51) is claimed by HDMI:</li>
+</ul>
+<p><a href="Images/2017-04-20-16-09-57.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-16-09-57.png" title="fig:blah" width="400" /></a></p>
+<p>This is bad, HDMI should've been disabled by uEnv.txt in our uboot.</p>
+<ul>
+<li>Q: Why is HDMI claiming pins if we've disabled it in <code>/boot/uboot/uEnv.txt</code>?</li>
+<li>Q: What is <code>nxp_hdmi_bonelt_pins</code>? some kernel driver?</li>
+<li>Q: What are &quot;pin groups&quot;? Ie, <code>group ...</code> in output above: maybe pins are partitioned into groups?
+<ul>
+<li>See <code>/sys/kernel/debug/pinctrl/44e10800.pinmux/pingroups</code>.</li>
+</ul></li>
+<li>Q: Correct?: <code>MUX UNCLAIMED</code> on pin 103 (for example): the pinmux controller hasn't hooked up any peripheral to the SoC ball pin #103?</li>
+<li><p>Q: <code>GPIO UNCLAIMED</code> means what? That the GPIO controller ... um?</p></li>
+<li>Q: what does it mean when a pin's mux is claimed (eg hdmi) but GPIO UNCLAIMED?
+<ul>
+<li>guess: some driver asked SoC to configure pin for eg hdmi, and NOT hook the pin up to some GPIO? Like, there's some higher-level GPIO functionality like &quot;should it trigger an interrupt&quot; that is not enabled.</li>
+</ul></li>
+</ul>
+<p>In the TRM, apparently MUX UNCLAIMED refers to some configuration of the green square (&quot;GPIO 0&quot;), whereas GPIO UNCLAIMED refers to a configuration of the gray one (&quot;GPIO Pads&quot;:</p>
+<p><a href="Images/2017-04-20-17-27-26.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-27-26.png" title="fig:blah" width="400" /></a></p>
+<p>Q: Is it normal to have <code>MUX CLAIMED</code> but <code>GPIO UNCLAIMED</code>?</p>
+<p>Q: I see that there's a sysfs entry set up for HDMI for some reason: <code>/sys/devices/platform/hdmi</code>. Why??</p>
+<p><a href="Images/2017-04-20-17-51-38.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-51-38.png" title="fig:blah" width="400" /></a></p>
+<p>Q: Anh did <code>lsmod</code>, saw <code>tilcdc</code> was loaded. He knew from before that this LKM is responsible for HDMI, responsible for the the <code>$PINS</code> being claimed as HDMI. How did he know this?</p>
+<h3 id="conclusion-cant-figure-out-why-hdmi-is-claiming-any-pins">Conclusion: Can't figure out why HDMI is claiming any pins</h3>
+<p>We commented out the magic line in <code>/boot/uboot/uEnv.txt</code> to disable all HDMI, and there's no HDMI cape loaded. Weird.</p>
+<h2 id="despite-failing-to-load-did-the-dto-produce-a-pwm-dir">Despite failing to load, did the DTO produce a pwm dir?</h2>
+<p>When you load a DTO that contains the line <code>compatible=BLAH</code>, the BLAH is the name of a kernel module that the cape mgr calls with the other fields of the DTO as arguments. The LKM tries to configure the peripheral / device based on those args. It may also build a sysfs entry that allows the user to interact with the peripheral through the kernel module. The directory <code>/sys/class/</code> is one popular place to put sysfs entries.</p>
+<p>So let's look for PWM stuff in <code>/sys/class/</code>.</p>
+<p><a href="Images/2017-04-20-17-32-26.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-32-26.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li><p>Q: What's <code>/sys/class</code> for, anyway? How are you supposed to use the contents of <code>/sys/class</code>?</p></li>
+<li><p>Q: Why nothing under <code>/sys/class/pwm</code>?</p></li>
+<li><p>Q: Why is no 'export' in <code>/sys/class/pwm/</code>?</p></li>
+<li><p>Q: What's gpiochip0,32,64,96 for? Cause we don't use them. Normally to enable a GPIO we just <code>echo 110 &gt; /sys/class/gpio/export</code> to create new sysfs entries for them, like this:</p></li>
+</ul>
+<p><a href="Images/2017-04-20-17-41-09.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-41-09.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li>Anh: Instead of having to <code>echo 107 &gt; /sys/class/gpio/export</code>, it turns out you can fully configure a GPIO entirely from a DTO, including where its sysfs entry is mounted. Don't have to go thru the 'export' thing.</li>
+</ul>
+<p>You can see the GPIO dirs in <code>/sys/class/gpio</code> just point to <code>/sys/devices/platform/ocp/...</code> dirs with names like <code>481ae000.gpio</code> that tell you what they're for (GPIO) and tell you their addr in the memory-mapping:</p>
+<p><a href="Images/2017-07-10-15-41-31.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-15-41-31.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li>Q: Why so many damn symlinks?! Confusing:</li>
+</ul>
+<p><a href="Images/2017-04-20-17-42-18.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-42-18.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li>Q: How are you supposed to use the files in <code>gpiochip0</code>?:</li>
+</ul>
+<p><a href="Images/2017-04-20-17-40-22.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-40-22.png" title="fig:blah" width="400" /></a></p>
+<h3 id="conclusion-didnt-find-any-pwm-stuff-sysclass-contains-weird-stuff.">Conclusion: Didn't find any PWM stuff; <code>/sys/class/</code> contains weird stuff.</h3>
+<p>Decision: Instead of PWM on P8_34, let's use a PWM peripheral that's not already claimed. How about P9_16.</p>
+<h2 id="reconfiguring-dto-file-to-use-unclaimed-pwm-pin-p9_16">Reconfiguring DTO file to use unclaimed PWM pin P9_16</h2>
+<p>Anh's nice spreadsheet (better than Derek's):</p>
+<p><a href="Images/2017-07-10-16-04-10.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-16-04-10.png" title="fig:blah" width="400" /></a></p>
+<p><a href="Images/2017-07-10-16-04-55.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-16-04-55.png" title="fig:blah" width="400" /></a></p>
+<p>For example, to make a DTS file that enables P9.16, gotta know nums for <code>pinctrl-single</code>:</p>
+<p><a href="Images/2017-07-10-16-06-00.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-16-06-00.png" title="fig:blah" width="400" /></a></p>
+<p>See the row 18: for pwm 1B, <code>0x4C</code>.</p>
+<p>&quot;BBB_Pins.xls&quot;</p>
+<p><a href="Images/2017-07-10-16-08-57.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-16-08-57.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li><code>pwm_P9_16:</code> is a label, referenced by other things in the DTS file.</li>
+<li><code>pinmux_pwm_P9_16_pins</code> is the name that'll appear in the <code>$PINS</code> list:</li>
+</ul>
+<p><a href="Images/2017-07-10-16-10-04.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-16-10-04.png" title="fig:blah" width="400" /></a></p>
+<h3 id="conclusion-successfully-claimed-p9_16.">Conclusion: Successfully claimed P9_16.</h3>
+<h2 id="explore-diff-btwn-lkms-bone-pinmux-helper-and-pwm_test">Explore diff btwn LKMs <code>bone-pinmux-helper</code> and <code>pwm_test</code></h2>
+<p>When we load the <code>bone_pwm_P8_34</code> DTO with <code>capes</code>, it creates <code>/sys/devices/platform/ocp/ocp:pwm_test_P8_34/</code>, which contains <code>of_node/duty</code> but not <code>of_node/period</code>, so we can't set the period (unless we somehow set it in the DTO, which I don't know how to do).</p>
+<p><a href="Images/2017-04-20-17-48-23.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-48-23.png" title="fig:blah" width="400" /></a></p>
+<p>Note: if you modify the DTO to have <code>target=&lt;/sys/blah&gt;</code>, apparently the cape manager will put the PWM directory there instead of <code>/sys/devices/platform/ocp/</code>.</p>
+<p>Guess: There's no <code>period</code> because we used the kernel driver <code>compatible=&quot;bone-pinmux-helper&quot;</code> in the DTO:</p>
+<p><a href="Images/2017-04-20-17-49-53.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-49-53.png" title="fig:blah" width="400" /></a></p>
+<p>Different kernel drivers set up different-looking sysfs entries.</p>
+<p>There are two LKMs that can set up pwm: <code>pwm-test</code> and <code>bone-pinmux-helper</code>. Anh had trouble w/ bone-pinmux-helper:</p>
+<p>Those LKMs don't just set up the sysfs entries, they also handle all the communciation with the sysfs entries; when you <code>echo 10000 &gt; duty</code>, the same LKM that set up the sysfs entry is handling that cmd and setting registers in teh SoC to honor your cmd.</p>
+<p>So a bug in a LKM could result in it not setting up duty registers right.</p>
+<p>sysfs: buffer shared btwn kernel &amp; userspace. (hard to move data btwn kernel &amp; userspace: explicit mem copy &amp; sanitized)</p>
+<p>Check out the difference between using the <code>pwm-test</code> and <code>bone-pinmux-helper</code> LKMs in our DTO:</p>
+<p><a href="Images/2017-04-20-17-58-07.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-58-07.png" title="fig:blah" width="400" /></a></p>
+<p>pwm-test: LKM seems clearly dedicated to setting up pwm. offers <code>enabled</code>,<code>duty</code>.</p>
+<p>bone-pinmux-helper: seems mainly setting up GPIO. Doesn't offer <code>enabled</code>,<code>duty</code>.</p>
+<h3 id="conclusion-edit-our-dto-to-use-pwm_test-lkm-instead-of-bone-pinmux-helper-seems-better-for-pwm.">Conclusion: Edit our DTO to use <code>pwm_test</code> LKM instead of <code>bone-pinmux-helper</code>, seems better for PWM.</h3>
+<h2 id="examine-the-am33xx_pwm-dto-how-does-it-configure-pwm">Examine the <code>AM33XX_PWM</code> DTO; how does <strong>it</strong> configure PWM?</h2>
+<p>I recall that PWM requires not only <code>bone_pwm_P8_34.dto</code> but also you need to enable the DTO <code>/lib/firmware/am33xx_pwm-00A0.dtbo</code>: - <code>capes am33xx_pwm</code> to load it - Why is this needed? - Maybe it's enabling something crucial.</p>
+<ul>
+<li><p>By decompiling am33xx_pwm.dtb`,</p>
+<p>dtc -I dtb -O dts -o am33xx_pwm-00A0.dts /lib/firmware/am33xx_pwm-00A0.dtb</p></li>
+</ul>
+<p>we see that loading <code>am33xx_pwm</code> dto may actually create <code>/sys/class/pwm/pwmchip0,1,2</code> dirs. The am33xx dts sets several fragments' statuses to 'okay', which may just turn them on? ANd each fragments represents a :</p>
+<p><a href="Images/2017-07-10-16-28-53.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-16-28-53.png" title="fig:blah" width="400" /></a></p>
+<p><a href="Images/2017-07-10-16-29-26.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-16-29-26.png" title="fig:blah" width="400" /></a></p>
+<p><strong>Important discovery</strong>: bug in <code>bone_pwm_P8_34-00A0.dts</code>: it enables the <code>ehrpwm1</code> sysfs entry but doesn't enable the <code>epwmss1</code> entry. We saw by looking at the decompiled am33xx_pwm dto that they were both required.</p>
+<h3 id="important-add-an-additional-clause-in-bone_pwm_p8_34-00a0.dts-to-enable-other-pwm-because-there-was-one-missing.">Important: Add an additional clause in <code>bone_pwm_P8_34-00A0.dts</code> to enable other PWM because there was one missing.</h3>
+<p>(Note: Also we used <code>P9_16</code> instead of <code>P8_34</code> and used Anh's clever xls to figure out what numbers to put in the dto to configure it for P9_16.)</p>
+<p>OLD:</p>
+<p><a href="Images/2017-07-10-16-37-01.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-16-37-01.png" title="fig:blah" width="400" /></a></p>
+<p>NEW:</p>
+<p><a href="Images/2017-07-10-16-37-12.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-16-37-12.png" title="fig:blah" width="400" /></a></p>
+<p>Now after <code>capes bone_pwm_P8_34</code> we see <code>/sys/class/pwm/pwmchip0</code> was created, with an <code>export</code> file that we can <code>echo 0</code> to, creating <code>/sys/class/pwm/pwmchip0/pwm0</code>, which has <code>period</code>, <code>duty_cycle</code>, <code>polarity</code>, etc. Then we <code>echo 1 &gt; enable</code> to turn it on. Also <code>echo 20000 &gt; period</code> and echo <code>echo 10000 &gt; duty_cycle</code></p>
+<ul>
+<li>Note: If kernel driver can't honor our echos, error msgs will appear in dmesg. So check that. It would be good to set of another terminal window that continuously displays the output of dmesg, like this:</li>
+</ul>
+<p><a href="https://unix.stackexchange.com/questions/95842/how-can-i-see-dmesg-output-as-it-changes" class="uri">https://unix.stackexchange.com/questions/95842/how-can-i-see-dmesg-output-as-it-changes</a></p>
+<pre><code>dmesg --follow</code></pre>
+<p>or</p>
+<pre><code>watch -n 0.1 &quot;dmesg | tail -n 20&quot;</code></pre>
+<p><code>/sys/kernel/debug/pinctrl/44e10800/...</code>:</p>
+<p><a href="Images/2017-07-10-16-50-23.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-16-50-23.png" title="fig:blah" width="400" /></a></p>
+<pre><code>pin 19 (44e1084c.0): ocp:helper (GPIO UNCLAIMED) function pinmux_pwm_P9_16_pins group pinmux_pwm_P9_16_pins</code></pre>
+<ul>
+<li>pin 19 = PWM 0 or something?</li>
+<li>44e1...: address (from TRM where?)<br />
+</li>
+<li>ocp:helper: from our DTO, the <code>target = &lt;&amp;ocp&gt;</code> attribute and the <code>helper {</code> dictionary.</li>
+<li><code>pinctrl-0</code>: ??</li>
+</ul>
+<h1 id="summary-steps-to-enable-pwm-on-the-roseline-linux-kernel">SUMMARY: Steps to enable PWM on the Roseline Linux kernel</h1>
+<ol start="0" style="list-style-type: decimal">
+<li>Get a window that's like showing output of dmesg like every</li>
+</ol>
+<p><code>/sys/kernel/debug/pinctrl/4410800.pinmux/pinmux-pins</code></p>
+<ol style="list-style-type: decimal">
+<li><p>Edit <code>bone_pwm_P8_34</code> to add a fragment for pwmess</p>
+<ul>
+<li>verify no errors in dmesg
+<ul>
+<li>if HDMI claims the pin,
+<ul>
+<li>(look in derek's book or Anh's &quot;BBB_Pins&quot; spreadsheet)</li>
+</ul></li>
+</ul></li>
+</ul></li>
+</ol>
+<ul>
+<li>note: may have to use a pwm pin not P8_34 but maybe P9_16 that doesn't conflict with HDMI, since $PINS showed that HDMI was still claiming pins even tho our uenv disabled HDMI.</li>
+</ul>
+<ol start="2" style="list-style-type: decimal">
+<li><p>compile this DTS into a dto and put in /lib/firmware:</p>
+<p>(shell script here)</p></li>
+<li><p><code>capes bone_pwm_P8_34</code> to load the dto</p>
+<ul>
+<li>verify in dmesg no errors</li>
+<li>now <code>/sys/class/pwm/pwmchip0</code> should exist</li>
+</ul></li>
+<li><p>Enable a PWM subsystem:</p>
+<pre><code>echo 0 &gt; /sys/class/pwm/pwmchip0/export</code></pre>
+<p>this creates <code>/sys/class/pwm/pwmchip0/pwm0/</code>, which has <code>duty_cycle</code>!!</p>
+<p>Actually we want</p>
+<pre><code>echo 1 &gt; /sys/class/pwm/pwmchip0/export</code></pre>
+<p>to create</p>
+<pre><code>/sys/class/pwm/pwmchip0/pwm1    </code></pre>
+<p>because we're using the &quot;B&quot; channel: ehrpwm1B</p>
+<ul>
+<li>Note: so it seems that <code>pwmchip0</code> refers to the 1st of 3 PWM subsystems, each with a channel A and B. (Note this seems to be zero-indexed whereas I think the TRM and Derek's tables may be one-indexed.) If using pwm &quot;B&quot;, like ehrpwm1B, then you should <code>echo 1 &gt; export</code> instead.
+<ul>
+<li>I read in the TRM that there are 3 pwm subsystems each with 2 channels: A &amp; B.</li>
+</ul></li>
+</ul></li>
+<li><p>Turn on PWM:</p>
+<pre><code>echo 20000 &gt; /sys/class/pwm/pwmchip0/pwm1/period
+echo 10000 &gt; /sys/class/pwm/pwmchip0/pwm1/duty_cycle
+echo 1 &gt; /sys/class/pwm/pwmchip0/pwm1/enable</code></pre>
+<ul>
+<li>check dmesg for errors.</li>
+<li>now should see physical pwm signal on P9_16 (or whatever pin you enabled)</li>
+</ul></li>
+</ol>
+<h1 id="appendices">APPENDICES</h1>
+<h1 id="understanding-device-tree-overlays">Understanding Device Tree Overlays</h1>
+<p>A DTO is a file which describes which pins should be connected to which peripherals, and names Linux kernel drivers that should configure them.</p>
+<p>Help me understand the fields in this DTO:</p>
+<p><a href="Images/2017-07-10-15-58-19.png" onclick="return hs.expand(this)"><img src="Images/2017-07-10-15-58-19.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li><code>compatible = &quot;pwm_test&quot;</code>: name of kernel driver that will set up sysfs entry &amp; broken data btwn userspace &amp; kernel space thru the sysfs entry</li>
+<li><p><code>pwms = &lt;&amp;ehrpwm1 1 500000 1&gt;;</code>: are these arguments to the kernel driver?</p></li>
+<li><p>a DTO entry specifies a kernel driver &amp; other stuff. The driver could set up sysfs entries that let you set eg the duty cycle etc, or maybe the driver would make you specify the duty cycle only once in the DTS file.</p></li>
+</ul>
+<p>Seems like <code>bone-pinmux-helper</code> isn't functioning properly, bc when we enable a DTO that contains <code>compatible=bone-pinmux-helper</code>, the resulting sysfs entry doesn't contain files <code>enabled</code> or <code>duty</code>, whereas those files <em>are</em> created when we enable a DTO whose <code>compatible</code> line contains the LKM <code>pwm-test</code>.</p>
+<ul>
+<li>Used P9-16 because P8-34 was used by HDMI, couldn't figure out how to get HDMI to unclaim it (already removed from uEnv.txt)</li>
+</ul>
+<p><a href="Images/device-tree-annotated.001.jpg" onclick="return hs.expand(this)"><img src="Images/device-tree-annotated.001.jpg" title="fig:blah" width="400" /></a></p>
+<p>The line <code>compatible='bone-pinmux-helper'</code> means that the <code>bone-pinmux-helper</code> LKM gets called. It's given args like <code>pinctrl-0</code> with value <code>&lt;&amp;pwm_P8_34&gt;</code>, which is a DTO reference that points to some overlay node above, that has an attr named <code>pinctrl-single,pins</code>. That may be another LKM. I think bone-pinmux-helper is calling pinctrl-single, which is throwing an error.</p>
+<p>Note: writing those magic numbers into the right registers isn't same as constructing the sysfs dirs. The pinctrl LKM requires those magic hex numbers for configuring registers. It may also set up sysfs entries, but maybe not.</p>
+<p>In the <code>compatible=BLAH</code> string in a DTO, the BLAH is the name of a kernel driver that the kernel should give the DTO structure, so that the driver can configure it correctly. Since the DTO is a tree, multiple kernel drivers get a crack at configuring a particular device.</p>
+<p><strong>Mounting points in DTOs</strong></p>
+<p>Here is a DTO that defines <code>bone_pwm_P8_34</code>. The <code>target=&lt;&amp;ocp&gt;</code> is a mount point? Once you load it w/ <code>capes ...</code>, you get <code>ocp:pwm_test_P8_34</code>:</p>
+<p><a href="Images/2017-04-20-17-47-09.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-47-09.png" title="fig:blah" width="400" /></a></p>
+<p><a href="Images/2017-04-20-17-47-26.png" onclick="return hs.expand(this)"><img src="Images/2017-04-20-17-47-26.png" title="fig:blah" width="400" /></a></p>
+<p>If you change <code>target = &lt;&amp;ocp&gt;</code> to like <code>target = &lt;./&gt;</code>, it'll create a pwm dir in like <code>/sys/devices</code> or something?</p>
+<h1 id="epilog">Epilog</h1>
+<p>Beaglebone's device tree is really hard for beginners. And all this OS stuff obscures the fundamentals of embedded hardware / software.</p>
+<p>Instead: better for tinkering:</p>
+<ul>
+<li>Adults: msb-430 launchpad
+<ul>
+<li>launchxl-F28027</li>
+<li>digikey</li>
+<li>embedded</li>
+<li>nice: toggle a gpio by writing to a register. Do pwm by setting up a timer &amp; capture.</li>
+</ul></li>
+<li>Kids: arduino
+<ul>
+<li>problem: wifi, gotta get a shield, trust author
+<ul>
+<li>in contrast, msb430 has library, but you'd have to implement the wifi interaction yourself :(</li>
+</ul></li>
+</ul></li>
+</ul>
+<p>Q: On BBB, why not all peripherals broken out onto balls? Then wouldn't need device tree. - SOC contains 100 peripheral-IOs * 7 modes per IO = 700 pins needed for functionality =&gt; huge chip. - for reference, intel i3 has 1150 pins</p>
+<h1 id="misc.-notes">Misc. Notes</h1>
+<ul>
+<li><p>All this debugging is for our Roseline kernel which is based on the Linux version 4.1 kernel. Version 4.4 is a whole different beast: RPMsg system is used for comms btwn kernel &amp; peripherals -- not just PRU but other stuff uses RPMsg, ugh.</p></li>
+<li>set up to use P9_16 to not conflict with HDMI (which loaded even tho we told it not to)</li>
+<li>using fragment &quot;pwm_test&quot; LKM, not bone-pinmux-helper, because bph no create 'period' sysfs entry, seems bad.</li>
+<li>added <code>fragment@2</code> to enable epwmss1 subsystem</li>
+<li><p>added <code>fragment@3</code> to enable ehrpwm1 subsystem (not sure why needed!!)</p></li>
+</ul>
+<p><a href="Images/2017-07-11-11-46-35.png" onclick="return hs.expand(this)"><img src="Images/2017-07-11-11-46-35.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li>All the AM33xx_PWM DTO does is enable <code>epwmss0</code>, <code>ehrpwm0</code>, <code>ecap0</code>, ... by adding <code>status =  &quot;okay&quot;</code> to each one, like so:</li>
+</ul>
+<p><a href="Images/2017-07-11-11-48-06.png" onclick="return hs.expand(this)"><img src="Images/2017-07-11-11-48-06.png" title="fig:blah" width="400" /></a></p>
+<ul>
+<li><p>so if we simply do that in our own DTO, then don't have to load AM33XX_PWM, nice.</p></li>
+<li><p>then we'd only have to load bone_pwm_P8_34 or whatever.</p></li>
+<li><p>despite <code>pwm_test</code> not showing up in <code>modinfo</code>, didn't encounter errors in dmesg when we used a DTO with <code>compatible = &quot;pwm_test&quot;</code>. So maybe DTO system was able to find <code>pwm_test</code> kernel mod anyway.</p></li>
+<li><p>Some DTOs use the <code>pwm_test</code> kernel module. Our Roseline kernel was built without this kernel module, see:</p>
+<p>modinfo pwm_test modinfo: ERROR: Module pwm_test not found</p>
+<ul>
+<li>But we don't encounter errors if we say <code>compatible=pwm_test</code> in our DTOs for some reason. (So where does <code>pwm_test</code> live?)</li>
+</ul></li>
+<li><p><code>pwm_test</code> didn't load up its desired period (<code>500000</code>) or duty cycle like it was supposed to. But can set it from the sysfs entry, good.</p></li>
+<li><p>The DTO file has <code>pwm_test_P8_34</code> after <code>__overlay__</code>, so anh says there should've been a <code>pwm_test_P8_34</code> in <code>/sys/devices/platform/ocp/</code>.</p></li>
+<li><p>Q: Why the hell so many symlinks?? Confusing.</p></li>
+<li><p>Q: Diff btwn /sys/devices/platform/ocp and /sys/class ??</p></li>
+<li><p>Note: 4.4 has new dir system</p></li>
+<li><p>Q: what does pin config look like when everything configured correctly?</p>
+<ul>
+<li><p><code>/sys/kernel/debug/pinctrl/44e10800.pinmux/pinmux-pins</code> shows</p>
+<ul>
+<li><code>pin 19 () ocp:helper (GPIO UNCLAIMED) function pinmux_pwm_P9_16_pins group pinmux_pwm_P9_16_pins</code></li>
+</ul></li>
+<li>pingroups: shows who's claiming each group:
+<ul>
+<li><p><code>group: pinmux_pwm_P9_16_pins, pin 19 (44e1...)</code></p></li>
+<li>Q: How group used?
+<ul>
+<li>A: a 'group' is just ...</li>
+</ul></li>
+</ul></li>
+</ul></li>
+</ul>
+<p>/sys/devices/platform/bone_capemgr/slot-4/{board-name, pin-usage, ...}</p>
+<p>pin-usage: which pins a 'slot' (?) is using</p>
+<p>bone-capemgr keeps track of which kernel mod is using which pins</p>
+<ul>
+<li>3.8 vs 3.12: 3.12 removed cape-mgr (bad).</li>
+</ul>
+<h1 id="resources">Resources</h1>
+<ul>
+<li>Cape Manager example
+<ul>
+<li><p>https://github.com/jadonk/validation-scripts/blob/master/test-capemgr/README.md</p></li>
+<li><p>&quot;There you go, we were able to load and unload drivers along with the required pinmux settings or having a hot-pluggable bus with device discovery. This is a big change for Linux and one that will drastically simplify development with small embedded Linux computers. No longer will you need to rebuild the kernel to get the driver you need loaded for your expansion pins. Of course, the drivers still need to be available in the kernel or as modules, but given the huge number of drivers available in the kernel, this is a huge lift that could save a lot of people a lot of time!</p></li>
+<li><p>Note that in this case, we've had to add a small driver that isn't in the mainline kernel called pinmux-helper. This driver gives us something to request the pins. Other drivers that already know about the pinctrl interface won't need to use pinmux-helper and eventually it'll need to be replaced by having all the drivers know how to use pinctrl, especially the gpio driver we are using!&quot;</p></li>
+</ul></li>
+<li>Draft of Device Tree Overlay system
+<ul>
+<li><a href="https://lkml.org/lkml/2012/11/5/615" class="uri">https://lkml.org/lkml/2012/11/5/615</a></li>
+<li>Linux kernel mailing list, very technical, also prelim disc of DTOs</li>
+<li>historical</li>
+</ul></li>
+<li>Crappy description of how DTOs work in 3.8 kernel
+<ul>
+<li><a href="http://elinux.org/BeagleBone_and_the_3.8_Kernel" class="uri">http://elinux.org/BeagleBone_and_the_3.8_Kernel</a></li>
+<li>Hard to understand, much jargon</li>
+</ul></li>
+<li>Device tree describing a whole machine
+<ul>
+<li><a href="http://elinux.org/Device_Tree_Usage" class="uri">http://elinux.org/Device_Tree_Usage</a></li>
+<li>doesn't describe the weird BBB-specific aspects of DTOs like <code>pinctrl-0</code></li>
+</ul></li>
+<li>Elinux.org references to device-tree stuff
+<ul>
+<li><a href="http://elinux.org/Device_Tree" class="uri">http://elinux.org/Device_Tree</a></li>
+</ul></li>
+<li>Elinux.org: Cape Manager
+<ul>
+<li><a href="http://elinux.org/Capemgr" class="uri">http://elinux.org/Capemgr</a></li>
+<li>somewhat useful description of DTO from 2013?</li>
+</ul></li>
+</ul>
+<h1 id="reference">Reference</h1>
+<ul>
+<li>&quot;What is a pin configured as?&quot;
+<ul>
+<li><code>/sys/kernel/debug/pinctrl/44e10800.pinmux/pins</code></li>
+</ul></li>
+<li><code>/sys/class/{pwm,gpio}</code>: where sysfs entries are put when loaded? Caution: many symlinks in here, prob points back to <code>/sys/device/platform/</code>.</li>
+<li><code>/sys/kernel/debug/pinctrl/44e10800.pinmux/pinmux-pins</code>: tells you what pins are claimed by which linux kernel drivers.</li>
+<li><code>lsmod</code>: which kernel modules are loaded
+<ul>
+<li>important for us: <code>qot</code>, <code>pwm_test</code>, ...?</li>
+<li>Note: <code>pwm_test</code> LKM is not included in our Roseline kernel, unfortunately: <code>modinfo pwm_test</code> returns empty</li>
+</ul></li>
+<li><code>dmesg</code>: kernel messages</li>
+<li><p><code>find /sys -iname &quot;*duty*&quot;</code> -- good for seeing if there's any duty-cycle-related file in all of <code>/sys/</code>.</p>
+<ul>
+<li>note: if doing <code>find /sys -iname &quot;*pwm*&quot;</code>, should exclude symlinks bc BBB DTO system uses lots of screwy symlinks for redirection.</li>
+</ul></li>
+<li><code>capes</code></li>
+<li><code>sys/devices/platform/ocp</code>: where several sysfs entries live. (Does bone-pinmux-helper put sysfs entries here?)</li>
+<li><p><code>/sys/class/pwm/</code>: hopefully <code>pwmchip0</code> lives here after you load <code>bone_pwm_P8_34</code>.</p></li>
+</ul>
+</body>
+</html>
